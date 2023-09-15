@@ -1,5 +1,5 @@
 # Must be placed in ~\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1
-
+# Can also be placed C:\Program Files\PowerShell\7\profile.ps1 for Powershell 7
 function Get-CmdletAlias ($cmdletname) {
   Get-Alias |
     Where-Object -FilterScript {$_.Definition -like "$cmdletname"} |
@@ -49,8 +49,12 @@ function which ($command) {
 
 
 # Remove the default powershell curl alias
-Remove-Item Alias:curl
+if (Test-Path Alias:curl) {
+	Remove-Item Alias:curl
+}
 
 
 # Remove the default powershell wget alias
-Remove-Item Alias:wget
+if (Test-Path Alias:wget) {
+	Remove-Item Alias:wget
+}
