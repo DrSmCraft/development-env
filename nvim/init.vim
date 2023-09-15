@@ -1,5 +1,8 @@
 " NeoVim configuartion file
 " Customized from https://github.com/cse30-fa22/basic_vimrc/blob/main/.vimrc
+" Must be placed in ~\AppData\Local\nvim\init.vim on Windows
+" Must be placed in ~/.config/nvim/init.vim on Linux
+
 
 " disable vi compatibility (emulation of old bugs)
 set nocompatible
