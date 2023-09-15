@@ -46,3 +46,11 @@ function which ($command) {
     Get-Command -Name $command -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty Path -ErrorAction SilentlyContinue
 }
+
+
+# Remove the default powershell curl alias
+Remove-Item Alias:curl
+
+
+# Remove the default powershell wget alias
+Remove-Item Alias:wget
