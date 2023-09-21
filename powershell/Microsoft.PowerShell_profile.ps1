@@ -1,5 +1,6 @@
 # Must be placed in ~\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1
 # Can also be placed C:\Program Files\PowerShell\7\profile.ps1 for Powershell 7
+
 function Get-CmdletAlias ($cmdletname) {
   Get-Alias |
     Where-Object -FilterScript {$_.Definition -like "$cmdletname"} |
@@ -29,6 +30,9 @@ Set-Alias -Name ifconfig -Value ipconfig
 # Define pwsh as powershell
 Set-Alias -Name pwsh -Value powershell
 
+# Define sudo as gsudo (utilizing https://github.com/gerardog/gsudo)
+Set-Alias -Name sudo -Value gsudo
+
 # Define ccat as pygmentize
 function ccat ($filename) {
         pygmentize -g $filename
@@ -47,14 +51,29 @@ function which ($command) {
         Select-Object -ExpandProperty Path -ErrorAction SilentlyContinue
 }
 
+# Define winstall as winget install
+function winstall ($args) {
+        winget install $args
+}
+
+# Define wuninstall as winget uninstall
+function wuninstall ($args) {
+        winget uninstall $args
+}
+
+# Define wsearch as winget search
+function wsearch ($args) {
+        winget search $args
+}
+
 
 # Remove the default powershell curl alias
 if (Test-Path Alias:curl) {
-	Remove-Item Alias:curl
+        Remove-Item Alias:curl
 }
 
 
 # Remove the default powershell wget alias
 if (Test-Path Alias:wget) {
-	Remove-Item Alias:wget
+        Remove-Item Alias:wget
 }
