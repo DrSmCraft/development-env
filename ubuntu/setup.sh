@@ -14,6 +14,7 @@ apt-get install -y zip unzip
 apt-get install -y tree
 apt-get install -y zsh
 apt-get install -y python-pygments
+apt-get install -y g++ gcc gdb
 
 
 echo "Configuring Bash"
