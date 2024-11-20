@@ -13,9 +13,10 @@ sudo apt-get install -y net-tools
 sudo apt-get install -y zip unzip
 sudo apt-get install -y tree
 sudo apt-get install -y zsh
+sudo apt-get install git curl wget
 sudo apt-get install -y python-pygments
 sudo apt-get install -y g++ gcc gdb
-sudo apt-get install -y git fakeroot build-essential ncurses-dev xz-utils libssl-dev bc flex libelf-dev bison
+sudo apt-get install -y  fakeroot build-essential ncurses-dev xz-utils libssl-dev bc flex libelf-dev bison
 
 echo "Configuring Bash"
 rm ~/.bashrc
