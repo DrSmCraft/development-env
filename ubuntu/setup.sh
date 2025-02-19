@@ -52,7 +52,7 @@ if [ "$kernel" = true ]; then
   sudo apt-get install -y fakeroot build-essential ncurses-dev xz-utils libssl-dev bc flex libelf-dev bison
 fi
 
-if [ "docker" = true ]; then
+if [ "$docker" = true ]; then
   # https://docs.docker.com/engine/install/ubuntu/
   sudo apt-get install ca-certificates curl
   sudo install -m 0755 -d /etc/apt/keyrings
