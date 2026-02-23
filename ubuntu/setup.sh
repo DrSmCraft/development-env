@@ -45,10 +45,12 @@ sudo apt-get install -y net-tools
 sudo apt-get install -y zip unzip
 sudo apt-get install -y tree
 sudo apt-get install -y zsh
-sudo apt-get install -y git curl wget
+sudo apt-get install -y git curl wget 
+sudo apt-get install -y cloc
 sudo apt-get install -y python-pygments
 sudo apt-get install -y ncdu duf ranger glances stat lsof
 sudo apt-get install -y wormhole
+
 
 
 if [ "$kernel" = true ]; then
