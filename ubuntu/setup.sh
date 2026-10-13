@@ -8,7 +8,9 @@ dry_run=false
 kernel=false
 docker=false
 docker_group=false
-# By default, remove vim
+jdk=false
+jdk_version=""      # empty = newest stable (LTS) release available
+# By default, remove vim (disable with --keep-vim)
 remove_vim=true
 
 LOG_FILE="${LOG_FILE:-$HOME/setup.log}"
@@ -30,8 +32,16 @@ run() {
     fi
 }
 
+# Non-interactive apt-get. `sudo env` is used because sudo resets the
+# environment by default, so a plain `export` would never reach apt.
+#   DEBIAN_FRONTEND=noninteractive  -> no debconf dialogs
+#   NEEDRESTART_MODE=a              -> needrestart restarts services automatically
+apt_get() {
+    run sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get "$@"
+}
 
-function show_help {
+
+show_help() {
     echo "Usage: setup.sh [options]"
     echo
     echo "This script sets up a development environment by installing various packages,"
@@ -43,8 +53,10 @@ function show_help {
     echo "  -d, --docker     Install Docker and its dependencies"
     echo "  --docker-group   Add the current user to the 'docker' group (root-equivalent!)"
     echo "  --all            Install both kernel development tools and Docker"
+    echo "  --jdk[=VERSION]  Install OpenJDK (headless) and set JAVA_HOME in /etc/profile.d/jdk.sh."
+    echo "                   Without VERSION, the newest stable (LTS) release available is used."
+    echo "                   Example: --jdk=21"
     echo "  --dry-run        Print what would be done without changing anything"
-    exit 0
 }
 
 
@@ -52,13 +64,20 @@ parse_args() {
     local arg
     for arg in "$@"; do
         case "$arg" in
-            -h|--help)      show_help; exit 0 ;;
-            -k|--kernel)       kernel=true ;;
-            -d|--docker)       docker=true ;;
-            --docker-group)       docker_group=true ;;
-            --all)          kernel=true; docker=true ;;
-            --dry-run)      dry_run=true ;;
-            *)              show_help >&2; die "Unknown option: $arg" ;;
+            -h|--help)        show_help; exit 0 ;;
+            -k|--kernel)      kernel=true ;;
+            -d|--docker)      docker=true ;;
+            --docker-group)   docker_group=true ;;
+            --all)            kernel=true; docker=true ;;
+            --jdk)            jdk=true ;;
+            --jdk=*)
+                jdk=true
+                jdk_version="${arg#--jdk=}"
+                [[ "$jdk_version" =~ ^[0-9]+$ ]] \
+                    || die "Invalid JDK version '$jdk_version' (expected a whole number such as 17 or 21)."
+                ;;
+            --dry-run)        dry_run=true ;;
+            *)                show_help >&2; die "Unknown option: $arg" ;;
         esac
     done
 }
@@ -111,7 +130,7 @@ install_optional() {
     local pkg
     for pkg in "$@"; do
         if apt-cache show "$pkg" >/dev/null 2>&1; then
-            apt install -y "$pkg" || warn "Failed to install optional package: $pkg"
+            apt_get install -y "$pkg" || warn "Failed to install optional package: $pkg"
         else
             warn "Package not available on this release, skipping: $pkg"
         fi
@@ -121,13 +140,14 @@ install_optional() {
 
 update_system() {
     log "Updating package lists and upgrading system"
-    run sudo apt update
-    run sudo apt upgrade -y
+    apt_get update
+    # --force-confold keeps existing config files instead of prompting.
+    apt_get upgrade -y -o Dpkg::Options::=--force-confold
 }
 
 install_base() {
     log "Installing base packages"
-    run sudo apt install -y \
+    apt_get install -y \
         neovim net-tools zip unzip tree zsh git curl wget ca-certificates \
         cloc ncdu ranger lsof
 
@@ -136,7 +156,7 @@ install_base() {
 
     if [ "$remove_vim" = true ]; then
         log "Removing vim and setting Neovim as the default editor"
-        run sudo apt remove -y vim vim-tiny vim-common || warn "Could not remove vim packages"
+        apt_get remove -y vim vim-tiny vim-common || warn "Could not remove vim packages"
         if command -v nvim >/dev/null 2>&1; then
             run sudo update-alternatives --set editor "$(command -v nvim)" \
                 || warn "Could not set nvim as the default editor"
@@ -146,9 +166,123 @@ install_base() {
 
 install_kernel_tools() {
     log "Installing kernel development tools"
-    run sudo apt install -y \
+    apt_get install -y \
         build-essential gdb fakeroot libncurses-dev xz-utils libssl-dev \
         bc flex bison libelf-dev dwarves rsync cpio
+}
+
+
+# ---------------------------------------------------------------------------
+# Java (OpenJDK)
+# ---------------------------------------------------------------------------
+# "Latest stable" means the newest LTS release. Non-LTS releases are short-lived
+# and early-access (alpha/beta) builds are never picked automatically.
+JDK_LTS_VERSIONS="8 11 17 21 25 29"   # ascending
+
+jdk_pkg_name() { printf 'openjdk-%s-jdk-headless' "$1"; }
+
+# Print the apt candidate version of a package ("(none)" or empty if unavailable).
+jdk_candidate() {
+    apt-cache policy "$(jdk_pkg_name "$1")" 2>/dev/null | awk '/Candidate:/ {print $2}' || true
+}
+
+jdk_is_installable() {
+    local cand
+    cand=$(jdk_candidate "$1")
+    [ -n "$cand" ] && [ "$cand" != "(none)" ]
+}
+
+# True for early-access/alpha/beta package versions, e.g. 26~13ea-1.
+jdk_is_prerelease() {
+    local re='~[0-9.]*(ea|alpha|beta)'
+    [[ "$1" =~ $re ]]
+}
+
+# Major versions of OpenJDK installable on this release, ascending.
+available_jdk_versions() {
+    local v
+    apt-cache pkgnames openjdk- 2>/dev/null \
+        | sed -nE 's/^openjdk-([0-9]+)-jdk-headless$/\1/p' \
+        | sort -un \
+        | while read -r v; do
+            if jdk_is_installable "$v"; then printf '%s\n' "$v"; fi
+        done
+}
+
+# Sets JDK_RESOLVED to the major version to install, or dies.
+# Note: with --dry-run the package lists are not refreshed, so this uses
+# whatever apt already knows about.
+resolve_jdk_version() {
+    local v cand best=""
+
+    if [ -n "$jdk_version" ]; then
+        if ! jdk_is_installable "$jdk_version"; then
+            die "OpenJDK $jdk_version is not available on this release. Available: $(available_jdk_versions | tr '\n' ' ')"
+        fi
+        cand=$(jdk_candidate "$jdk_version")
+        if jdk_is_prerelease "$cand"; then
+            warn "OpenJDK $jdk_version is a pre-release (early-access) build here: $cand"
+        fi
+        JDK_RESOLVED=$jdk_version
+        return 0
+    fi
+
+    for v in $JDK_LTS_VERSIONS; do
+        jdk_is_installable "$v" || continue
+        cand=$(jdk_candidate "$v")
+        if jdk_is_prerelease "$cand"; then
+            warn "Skipping OpenJDK $v: pre-release build ($cand)"
+            continue
+        fi
+        best=$v    # list is ascending, so the last match is the newest
+    done
+
+    [ -n "$best" ] \
+        || die "No stable (LTS) OpenJDK found in the apt repositories. Available: $(available_jdk_versions | tr '\n' ' ')"
+    JDK_RESOLVED=$best
+}
+
+write_jdk_profile() {  # usage: write_jdk_profile <java_home>
+    local java_home=$1 dest=/etc/profile.d/jdk.sh content
+    content=$(printf '# Managed by setup.sh\nexport JAVA_HOME=%s\n' "$java_home")
+
+    if [ "$dry_run" = true ]; then
+        printf '[dry-run] write %s:\n%s\n' "$dest" "$content"
+        return 0
+    fi
+    printf '%s\n' "$content" | sudo tee "$dest" >/dev/null
+    sudo chmod 644 "$dest"
+    log "Wrote $dest"
+}
+
+install_jdk() {
+    log "Installing OpenJDK"
+    resolve_jdk_version
+
+    local pkg java_home
+    pkg=$(jdk_pkg_name "$JDK_RESOLVED")
+    java_home="/usr/lib/jvm/java-${JDK_RESOLVED}-openjdk-$(dpkg --print-architecture)"
+    log "Selected OpenJDK $JDK_RESOLVED ($pkg)"
+
+    apt_get install -y "$pkg"
+
+    if [ "$dry_run" != true ] && [ ! -d "$java_home" ]; then
+        warn "Expected JAVA_HOME directory not found: $java_home; skipping JAVA_HOME setup."
+        return 0
+    fi
+
+    # Make this version the system default even if another JDK is installed.
+    run sudo update-alternatives --set java  "$java_home/bin/java" \
+        || warn "Could not set default java alternative"
+    run sudo update-alternatives --set javac "$java_home/bin/javac" \
+        || warn "Could not set default javac alternative"
+
+    write_jdk_profile "$java_home"
+
+    if [ "$dry_run" != true ]; then
+        "$java_home/bin/java" -version
+        "$java_home/bin/javac" -version
+    fi
 }
 
 
@@ -157,10 +291,11 @@ install_kernel_tools() {
 # ---------------------------------------------------------------------------
 remove_conflicting_docker_pkgs() {
     local pkg
-    for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
+    for pkg in docker.io docker-doc docker-compose docker-compose-v2 \
+               podman-docker containerd runc; do
         if dpkg -s "$pkg" >/dev/null 2>&1; then
             warn "Removing conflicting package: $pkg"
-            run sudo apt remove -y "$pkg"
+            apt_get remove -y "$pkg"
         fi
     done
 }
@@ -170,7 +305,7 @@ install_docker() {
     # https://docs.docker.com/engine/install/ubuntu/ (and /debian/)
     remove_conflicting_docker_pkgs
 
-    run sudo apt install -y ca-certificates curl
+    apt_get install -y ca-certificates curl
     run sudo install -m 0755 -d /etc/apt/keyrings
     run sudo curl -fsSL "https://download.docker.com/linux/${DOCKER_REPO_ID}/gpg" \
         -o /etc/apt/keyrings/docker.asc
@@ -184,8 +319,8 @@ install_docker() {
         printf '%s\n' "$repo_line" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
     fi
 
-    run sudo apt update
-    run sudo apt install -y docker-ce docker-ce-cli containerd.io \
+    apt_get update
+    apt_get install -y docker-ce docker-ce-cli containerd.io \
         docker-buildx-plugin docker-compose-plugin
 
     if [ "$docker_group" = true ]; then
@@ -218,6 +353,9 @@ fetch_config() {  # usage: fetch_config <path-in-repo> <destination>
         return 1
     fi
 
+    # mktemp creates files as 0600; dotfiles should be normal 0644.
+    chmod 644 "$tmp"
+
     run mkdir -p "$(dirname "$dest")"
     if [ -e "$dest" ]; then
         run cp -a "$dest" "${dest}.bak.$(date +%Y%m%d%H%M%S)"
@@ -226,10 +364,40 @@ fetch_config() {  # usage: fetch_config <path-in-repo> <destination>
     log "Installed $dest"
 }
 
+
+# /etc/profile.d is only read by login shells, and the dotfiles fetched above
+# replace ~/.bashrc and ~/.zshrc on every run. So after fetching, make sure both
+# rc files source jdk.sh (idempotent: skipped if the line is already there).
+ensure_jdk_in_rc() {  # usage: ensure_jdk_in_rc <rc-file>
+    local rc=$1
+    if [ "$dry_run" = true ]; then
+        printf '[dry-run] ensure %s sources /etc/profile.d/jdk.sh\n' "$rc"
+        return 0
+    fi
+    if [ ! -f "$rc" ]; then
+        warn "$rc not found; JAVA_HOME will not be set for that shell."
+        return 0
+    fi
+    if grep -qF '/etc/profile.d/jdk.sh' "$rc"; then
+        return 0
+    fi
+    cat >> "$rc" <<'EOF'
+
+# JAVA_HOME (added by setup.sh)
+if [ -r /etc/profile.d/jdk.sh ]; then . /etc/profile.d/jdk.sh; fi
+EOF
+    log "Added JAVA_HOME source line to $rc"
+}
+
 configure_shells() {
     log "Configuring Bash and Zsh"
     fetch_config bash/.bashrc "$HOME/.bashrc" || true
     fetch_config zsh/.zshrc   "$HOME/.zshrc"  || true
+
+    if [ "$jdk" = true ]; then
+        ensure_jdk_in_rc "$HOME/.bashrc"
+        ensure_jdk_in_rc "$HOME/.zshrc"
+    fi
 
     log "Setting Zsh as the default shell"
     local zsh_path
@@ -270,20 +438,26 @@ configure_neovim() {
 # Main
 # ---------------------------------------------------------------------------
 main() {
-    log "Starting setup script at $(date)"
-    parse_args "$@"
-
-    # Log everything to the console and a file.
+    # Log everything (including argument errors) to the console and a file.
     exec > >(tee -a "$LOG_FILE") 2>&1
+
+    log "Starting setup script at $(date)"
     log "Logging to $LOG_FILE"
+
+    parse_args "$@"
 
     preflight
     update_system
     install_base
+    if [ "$jdk" = true ]; then install_jdk; fi
     if [ "$kernel" = true ]; then install_kernel_tools; fi
     if [ "$docker" = true ]; then install_docker; fi
     configure_shells
     configure_neovim
+
+    if [ "$jdk" = true ]; then
+        echo "JAVA_HOME is set in /etc/profile.d/jdk.sh (read by login shells). If zsh does not pick it up, source that file from ~/.zshrc."
+    fi
 
     if [ "$docker_group" = true ]; then
         echo "Log out and back in for shell and docker group changes to take effect."
@@ -292,7 +466,7 @@ main() {
     fi
 
     log "Done"
-    exit 0;
+    exit 0
 }
 
 main "$@"
