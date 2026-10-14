@@ -456,13 +456,13 @@ main() {
     configure_neovim
 
     if [ "$jdk" = true ]; then
-        echo "JAVA_HOME is set in /etc/profile.d/jdk.sh (read by login shells). If zsh does not pick it up, source that file from ~/.zshrc."
+      warn "JAVA_HOME is defined in /etc/profile.d/jdk.sh and sourced from ~/.bashrc and ~/.zshrc. Open a new shell to pick it up."
     fi
 
     if [ "$docker_group" = true ]; then
-        echo "Log out and back in for shell and docker group changes to take effect."
+        warn "Log out and back in for shell and docker group changes to take effect."
     else
-        echo "Log out and back in for the shell change to take effect."
+        warn "Log out and back in for the shell change to take effect."
     fi
 
     log "Done"
