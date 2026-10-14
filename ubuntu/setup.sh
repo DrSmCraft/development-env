@@ -10,6 +10,8 @@ docker=false
 docker_group=false
 jdk=false
 jdk_version=""      # empty = newest stable (LTS) release available
+python=false
+python_version=""   # empty = newest stable release available (e.g. 3.12)
 # By default, remove vim (disable with --keep-vim)
 remove_vim=true
 
@@ -56,6 +58,10 @@ show_help() {
     echo "  --jdk[=VERSION]  Install OpenJDK (headless) and set JAVA_HOME in /etc/profile.d/jdk.sh."
     echo "                   Without VERSION, the newest stable (LTS) release available is used."
     echo "                   Example: --jdk=21"
+    echo "  --python[=X.Y]   Install Python from the distro's apt repositories (side by side;"
+    echo "                   the system python3 is left alone). Without X.Y, the newest"
+    echo "                   stable release available is used. Example: --python=3.12"
+#    echo "  --keep-vim       Do not remove vim or change the default editor"
     echo "  --dry-run        Print what would be done without changing anything"
 }
 
@@ -75,6 +81,14 @@ parse_args() {
                 jdk_version="${arg#--jdk=}"
                 [[ "$jdk_version" =~ ^[0-9]+$ ]] \
                     || die "Invalid JDK version '$jdk_version' (expected a whole number such as 17 or 21)."
+                ;;
+#            --keep-vim)       remove_vim=false ;;
+            --python)         python=true ;;
+            --python=*)
+                python=true
+                python_version="${arg#--python=}"
+                [[ "$python_version" =~ ^3\.[0-9]+$ ]] \
+                    || die "Invalid Python version '$python_version' (expected major.minor, such as 3.12)."
                 ;;
             --dry-run)        dry_run=true ;;
             *)                show_help >&2; die "Unknown option: $arg" ;;
@@ -137,6 +151,24 @@ install_optional() {
     done
 }
 
+# Print the apt candidate version of a package ("(none)" or empty if unavailable).
+apt_candidate() {
+    apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2}' || true
+}
+
+apt_installable() {
+    local cand
+    cand=$(apt_candidate "$1")
+    [ -n "$cand" ] && [ "$cand" != "(none)" ]
+}
+
+# True for early-access / alpha / beta / release-candidate package versions,
+# e.g. OpenJDK 26~13ea-1 or Python 3.14.0~rc2-1, ~b1, ~a3.
+is_prerelease_version() {
+    local re='~([0-9.]*(ea|alpha|beta)|(a|b|rc)[0-9]+)'
+    [[ "$1" =~ $re ]]
+}
+
 
 update_system() {
     log "Updating package lists and upgrading system"
@@ -181,22 +213,8 @@ JDK_LTS_VERSIONS="8 11 17 21 25 29"   # ascending
 
 jdk_pkg_name() { printf 'openjdk-%s-jdk-headless' "$1"; }
 
-# Print the apt candidate version of a package ("(none)" or empty if unavailable).
-jdk_candidate() {
-    apt-cache policy "$(jdk_pkg_name "$1")" 2>/dev/null | awk '/Candidate:/ {print $2}' || true
-}
-
-jdk_is_installable() {
-    local cand
-    cand=$(jdk_candidate "$1")
-    [ -n "$cand" ] && [ "$cand" != "(none)" ]
-}
-
-# True for early-access/alpha/beta package versions, e.g. 26~13ea-1.
-jdk_is_prerelease() {
-    local re='~[0-9.]*(ea|alpha|beta)'
-    [[ "$1" =~ $re ]]
-}
+jdk_candidate()       { apt_candidate "$(jdk_pkg_name "$1")"; }
+jdk_is_installable() { apt_installable "$(jdk_pkg_name "$1")"; }
 
 # Major versions of OpenJDK installable on this release, ascending.
 available_jdk_versions() {
@@ -220,7 +238,7 @@ resolve_jdk_version() {
             die "OpenJDK $jdk_version is not available on this release. Available: $(available_jdk_versions | tr '\n' ' ')"
         fi
         cand=$(jdk_candidate "$jdk_version")
-        if jdk_is_prerelease "$cand"; then
+        if is_prerelease_version "$cand"; then
             warn "OpenJDK $jdk_version is a pre-release (early-access) build here: $cand"
         fi
         JDK_RESOLVED=$jdk_version
@@ -230,7 +248,7 @@ resolve_jdk_version() {
     for v in $JDK_LTS_VERSIONS; do
         jdk_is_installable "$v" || continue
         cand=$(jdk_candidate "$v")
-        if jdk_is_prerelease "$cand"; then
+        if is_prerelease_version "$cand"; then
             warn "Skipping OpenJDK $v: pre-release build ($cand)"
             continue
         fi
@@ -282,6 +300,88 @@ install_jdk() {
     if [ "$dry_run" != true ]; then
         "$java_home/bin/java" -version
         "$java_home/bin/javac" -version
+    fi
+}
+
+
+# ---------------------------------------------------------------------------
+# Python (distro packages)
+# ---------------------------------------------------------------------------
+# Only versions packaged by the distro are available (no PPAs). "Latest stable"
+# is the highest pythonX.Y with an apt candidate that is not a pre-release.
+# The interpreter is installed side by side as pythonX.Y; /usr/bin/python3 is
+# deliberately left untouched because system tools depend on it.
+python_pkg_name() { printf 'python%s' "$1"; }
+
+python_candidate()       { apt_candidate "$(python_pkg_name "$1")"; }
+python_is_installable() { apt_installable "$(python_pkg_name "$1")"; }
+
+# Installable Python versions (X.Y) on this release, ascending.
+available_python_versions() {
+    local v
+    apt-cache pkgnames python3. 2>/dev/null \
+        | sed -nE 's/^python(3\.[0-9]+)$/\1/p' \
+        | sort -t. -k2,2n -u \
+        | while read -r v; do
+            if python_is_installable "$v"; then printf '%s\n' "$v"; fi
+        done
+}
+
+# Sets PYTHON_RESOLVED to the X.Y version to install, or dies.
+# Note: with --dry-run the package lists are not refreshed, so this uses
+# whatever apt already knows about.
+resolve_python_version() {
+    local v cand best=""
+
+    if [ -n "$python_version" ]; then
+        if ! python_is_installable "$python_version"; then
+            die "Python $python_version is not available from the apt repositories on this release. Available: $(available_python_versions | tr '\n' ' ')"
+        fi
+        cand=$(python_candidate "$python_version")
+        if is_prerelease_version "$cand"; then
+            warn "Python $python_version is a pre-release build here: $cand"
+        fi
+        PYTHON_RESOLVED=$python_version
+        return 0
+    fi
+
+    for v in $(available_python_versions); do
+        cand=$(python_candidate "$v")
+        if is_prerelease_version "$cand"; then
+            warn "Skipping Python $v: pre-release build ($cand)"
+            continue
+        fi
+        best=$v    # list is ascending, so the last match is the newest
+    done
+
+    [ -n "$best" ] \
+        || die "No stable Python found in the apt repositories. Available: $(available_python_versions | tr '\n' ' ')"
+    PYTHON_RESOLVED=$best
+}
+
+install_python() {
+    log "Installing Python"
+    resolve_python_version
+
+    local py="python${PYTHON_RESOLVED}"
+    log "Selected Python $PYTHON_RESOLVED ($py)"
+
+    apt_get install -y "$py" python3-pip
+    # venv (needed for virtual environments on Debian/Ubuntu) and headers for
+    # building C extensions; skip politely if a release does not package them.
+    install_optional "${py}-venv" "${py}-dev"
+
+    if [ "$dry_run" != true ]; then
+        "$py" --version
+        # Prove venv + ensurepip really work, not just that the package exists.
+        local tmp
+        tmp=$(mktemp -d)
+        if "$py" -m venv "$tmp/venv"; then
+            log "$py can create virtual environments"
+        else
+            warn "$py could not create a virtual environment; is ${py}-venv installed?"
+        fi
+        rm -rf "$tmp"
     fi
 }
 
@@ -363,7 +463,6 @@ fetch_config() {  # usage: fetch_config <path-in-repo> <destination>
     run mv "$tmp" "$dest"
     log "Installed $dest"
 }
-
 
 # /etc/profile.d is only read by login shells, and the dotfiles fetched above
 # replace ~/.bashrc and ~/.zshrc on every run. So after fetching, make sure both
@@ -450,13 +549,18 @@ main() {
     update_system
     install_base
     if [ "$jdk" = true ]; then install_jdk; fi
+    if [ "$python" = true ]; then install_python; fi
     if [ "$kernel" = true ]; then install_kernel_tools; fi
     if [ "$docker" = true ]; then install_docker; fi
     configure_shells
     configure_neovim
 
     if [ "$jdk" = true ]; then
-      warn "JAVA_HOME is defined in /etc/profile.d/jdk.sh and sourced from ~/.bashrc and ~/.zshrc. Open a new shell to pick it up."
+        warn "JAVA_HOME is defined in /etc/profile.d/jdk.sh and sourced from ~/.bashrc and ~/.zshrc. Open a new shell to pick it up."
+    fi
+
+    if [ "$python" = true ]; then
+        echo "Python ${PYTHON_RESOLVED:-} is installed as python${PYTHON_RESOLVED:-X.Y}; the system python3 was not changed. Use: python${PYTHON_RESOLVED:-X.Y} -m venv .venv"
     fi
 
     if [ "$docker_group" = true ]; then
@@ -465,7 +569,7 @@ main() {
         warn "Log out and back in for the shell change to take effect."
     fi
 
-    log "Done"
+    log "Finished setup script at $(date)"
     exit 0
 }
 
